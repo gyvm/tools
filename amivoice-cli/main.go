@@ -1,6 +1,7 @@
 package main
 
 import (
+    "bufio"
     "bytes"
     "encoding/json"
     "flag"
@@ -71,6 +72,9 @@ type AsyncJobResponse struct {
 }
 
 func main() {
+    // .envファイルを読み込む
+    loadEnvFile()
+    
     config := parseFlags()
     
     if config.AudioFile == "" {
@@ -139,84 +143,27 @@ func parseFlags() *Config {
 }
 
 func processSyncHTTP(config *Config) (string, error) {
-    // エンドポイントの決定
-    endpoint := "https://acp-api.amivoice.com/v1/recognize"
-    if config.NoLog {
-        endpoint = "https://acp-api.amivoice.com/v1/nolog/recognize"
-    }
+    endpoint := getEndpoint("https://acp-api.amivoice.com/v1/recognize", config.NoLog)
     
-    // マルチパートフォームの作成
-    body := &bytes.Buffer{}
-    writer := multipart.NewWriter(body)
-    
-    // APP KEY
-    writer.WriteField("u", config.AppKey)
-    
-    // dパラメータの構築
-    dParams := buildDParams(config)
-    writer.WriteField("d", dParams)
-    
-    // 音声フォーマット
-    if config.AudioFormat != "" {
-        writer.WriteField("c", config.AudioFormat)
-    }
-    
-    // 音声ファイル
-    file, err := os.Open(config.AudioFile)
-    if err != nil {
-        return "", fmt.Errorf("音声ファイルを開けません: %v", err)
-    }
-    defer file.Close()
-    
-    part, err := writer.CreateFormField("a")
+    body, contentType, err := createMultipartForm(config, false)
     if err != nil {
         return "", err
     }
     
-    _, err = io.Copy(part, file)
-    if err != nil {
-        return "", err
-    }
-    
-    err = writer.Close()
-    if err != nil {
-        return "", err
-    }
-    
-    // HTTPリクエストの作成と送信
     if config.Verbose {
         log.Printf("エンドポイント: %s", endpoint)
-        log.Printf("dパラメータ: %s", dParams)
+        log.Printf("dパラメータ: %s", buildDParams(config))
     }
     
-    req, err := http.NewRequest("POST", endpoint, body)
-    if err != nil {
-        return "", err
-    }
-    req.Header.Set("Content-Type", writer.FormDataContentType())
-    
-    client := &http.Client{Timeout: 300 * time.Second}
-    resp, err := client.Do(req)
-    if err != nil {
-        return "", err
-    }
-    defer resp.Body.Close()
-    
-    // レスポンスの読み取り
-    respBody, err := io.ReadAll(resp.Body)
+    respBody, err := doHTTPRequest("POST", endpoint, body, map[string]string{
+        "Content-Type": contentType,
+    }, 300*time.Second, config.Verbose)
     if err != nil {
         return "", err
     }
     
-    if config.Verbose {
-        log.Printf("HTTPステータス: %d", resp.StatusCode)
-        log.Printf("レスポンス: %s", string(respBody))
-    }
-    
-    // JSONのパース
     var syncResp SyncResponse
-    err = json.Unmarshal(respBody, &syncResp)
-    if err != nil {
+    if err := json.Unmarshal(respBody, &syncResp); err != nil {
         return "", fmt.Errorf("JSONパースエラー: %v", err)
     }
     
@@ -228,13 +175,8 @@ func processSyncHTTP(config *Config) (string, error) {
 }
 
 func processAsyncHTTP(config *Config) (string, error) {
-    // エンドポイント
-    endpoint := "https://acp-api-async.amivoice.com/v1/recognitions"
-    if config.NoLog {
-        endpoint = "https://acp-api-async.amivoice.com/v1/nolog/recognitions"
-    }
+    endpoint := getEndpoint("https://acp-api-async.amivoice.com/v1/recognitions", config.NoLog)
     
-    // 音声認識ジョブの開始
     sessionID, err := startAsyncJob(config, endpoint)
     if err != nil {
         return "", err
@@ -244,7 +186,6 @@ func processAsyncHTTP(config *Config) (string, error) {
         log.Printf("セッションID: %s", sessionID)
     }
     
-    // ジョブの完了を待つ
     for {
         status, result, err := checkAsyncJobStatus(config, endpoint, sessionID)
         if err != nil {
@@ -266,72 +207,20 @@ func processAsyncHTTP(config *Config) (string, error) {
 }
 
 func startAsyncJob(config *Config, endpoint string) (string, error) {
-    // マルチパートフォームの作成
-    body := &bytes.Buffer{}
-    writer := multipart.NewWriter(body)
-    
-    // APP KEY
-    writer.WriteField("u", config.AppKey)
-    
-    // dパラメータの構築
-    dParams := buildDParams(config)
-    writer.WriteField("d", dParams)
-    
-    // 音声フォーマット
-    if config.AudioFormat != "" {
-        writer.WriteField("c", config.AudioFormat)
-    }
-    
-    // 音声ファイル
-    file, err := os.Open(config.AudioFile)
-    if err != nil {
-        return "", fmt.Errorf("音声ファイルを開けません: %v", err)
-    }
-    defer file.Close()
-    
-    part, err := writer.CreateFormFile("a", filepath.Base(config.AudioFile))
+    body, contentType, err := createMultipartForm(config, true)
     if err != nil {
         return "", err
     }
     
-    _, err = io.Copy(part, file)
+    respBody, err := doHTTPRequest("POST", endpoint, body, map[string]string{
+        "Content-Type": contentType,
+    }, 60*time.Second, false)
     if err != nil {
         return "", err
     }
     
-    err = writer.Close()
-    if err != nil {
-        return "", err
-    }
-    
-    // HTTPリクエストの作成と送信
-    req, err := http.NewRequest("POST", endpoint, body)
-    if err != nil {
-        return "", err
-    }
-    req.Header.Set("Content-Type", writer.FormDataContentType())
-    
-    client := &http.Client{Timeout: 60 * time.Second}
-    resp, err := client.Do(req)
-    if err != nil {
-        return "", err
-    }
-    defer resp.Body.Close()
-    
-    // レスポンスの読み取り
-    respBody, err := io.ReadAll(resp.Body)
-    if err != nil {
-        return "", err
-    }
-    
-    if resp.StatusCode != http.StatusOK {
-        return "", fmt.Errorf("HTTPエラー: %d - %s", resp.StatusCode, string(respBody))
-    }
-    
-    // JSONのパース
     var jobResp AsyncJobResponse
-    err = json.Unmarshal(respBody, &jobResp)
-    if err != nil {
+    if err := json.Unmarshal(respBody, &jobResp); err != nil {
         return "", fmt.Errorf("JSONパースエラー: %v", err)
     }
     
@@ -341,27 +230,15 @@ func startAsyncJob(config *Config, endpoint string) (string, error) {
 func checkAsyncJobStatus(config *Config, endpoint string, sessionID string) (string, string, error) {
     url := fmt.Sprintf("%s/%s", endpoint, sessionID)
     
-    req, err := http.NewRequest("GET", url, nil)
-    if err != nil {
-        return "", "", err
-    }
-    req.Header.Set("Authorization", "Bearer "+config.AppKey)
-    
-    client := &http.Client{Timeout: 30 * time.Second}
-    resp, err := client.Do(req)
-    if err != nil {
-        return "", "", err
-    }
-    defer resp.Body.Close()
-    
-    respBody, err := io.ReadAll(resp.Body)
+    respBody, err := doHTTPRequest("GET", url, nil, map[string]string{
+        "Authorization": "Bearer " + config.AppKey,
+    }, 30*time.Second, false)
     if err != nil {
         return "", "", err
     }
     
     var jobResp AsyncJobResponse
-    err = json.Unmarshal(respBody, &jobResp)
-    if err != nil {
+    if err := json.Unmarshal(respBody, &jobResp); err != nil {
         return "", "", fmt.Errorf("JSONパースエラー: %v", err)
     }
     
@@ -379,13 +256,8 @@ func checkAsyncJobStatus(config *Config, endpoint string, sessionID string) (str
 }
 
 func processWebSocket(config *Config) (string, error) {
-    // WebSocket エンドポイント
-    endpoint := "wss://acp-api.amivoice.com/v1/"
-    if config.NoLog {
-        endpoint = "wss://acp-api.amivoice.com/v1/nolog/"
-    }
+    endpoint := getWebSocketEndpoint(config.NoLog)
     
-    // WebSocket接続
     dialer := websocket.Dialer{}
     conn, _, err := dialer.Dial(endpoint, nil)
     if err != nil {
@@ -393,97 +265,23 @@ func processWebSocket(config *Config) (string, error) {
     }
     defer conn.Close()
     
-    // 認証コマンド
-    authCmd := fmt.Sprintf("s %s", config.AppKey)
-    err = conn.WriteMessage(websocket.TextMessage, []byte(authCmd))
-    if err != nil {
+    if err := authenticateWebSocket(conn, config.AppKey); err != nil {
         return "", err
     }
     
-    // 認証応答を待つ
-    _, msg, err := conn.ReadMessage()
-    if err != nil {
+    if err := startWebSocketRecognition(conn, config); err != nil {
         return "", err
     }
     
-    if !strings.HasPrefix(string(msg), "s ") {
-        return "", fmt.Errorf("認証エラー: %s", string(msg))
-    }
-    
-    // 音声認識開始コマンド
-    dParams := buildDParams(config)
-    startCmd := fmt.Sprintf("s %s %s", config.AudioFormat, dParams)
-    err = conn.WriteMessage(websocket.TextMessage, []byte(startCmd))
-    if err != nil {
+    if err := sendAudioDataWebSocket(conn, config.AudioFile); err != nil {
         return "", err
     }
     
-    // 音声データの送信
-    file, err := os.Open(config.AudioFile)
-    if err != nil {
-        return "", fmt.Errorf("音声ファイルを開けません: %v", err)
-    }
-    defer file.Close()
-    
-    // 音声データを小さなチャンクに分けて送信
-    buffer := make([]byte, 4096)
-    for {
-        n, err := file.Read(buffer)
-        if err == io.EOF {
-            break
-        }
-        if err != nil {
-            return "", err
-        }
-        
-        // 'p'コマンドで音声データを送信
-        err = conn.WriteMessage(websocket.BinaryMessage, append([]byte("p "), buffer[:n]...))
-        if err != nil {
-            return "", err
-        }
-    }
-    
-    // 音声終了コマンド
-    err = conn.WriteMessage(websocket.TextMessage, []byte("e "))
-    if err != nil {
+    if err := conn.WriteMessage(websocket.TextMessage, []byte("e ")); err != nil {
         return "", err
     }
     
-    // 結果の受信
-    var results []string
-    for {
-        _, msg, err := conn.ReadMessage()
-        if err != nil {
-            return "", err
-        }
-        
-        msgStr := string(msg)
-        if config.Verbose {
-            log.Printf("受信: %s", msgStr)
-        }
-        
-        if strings.HasPrefix(msgStr, "A ") || strings.HasPrefix(msgStr, "U ") {
-            // 認識結果
-            parts := strings.SplitN(msgStr, " ", 2)
-            if len(parts) > 1 {
-                var result map[string]interface{}
-                err := json.Unmarshal([]byte(parts[1]), &result)
-                if err == nil {
-                    if text, ok := result["text"].(string); ok && text != "" {
-                        results = append(results, text)
-                    }
-                }
-            }
-        } else if strings.HasPrefix(msgStr, "e ") {
-            // 終了
-            break
-        } else if strings.HasPrefix(msgStr, "E ") {
-            // エラー
-            return "", fmt.Errorf("WebSocketエラー: %s", msgStr)
-        }
-    }
-    
-    return strings.Join(results, "\n"), nil
+    return receiveWebSocketResults(conn, config.Verbose)
 }
 
 func buildDParams(config *Config) string {
@@ -512,6 +310,217 @@ func buildDParams(config *Config) string {
     }
     
     return strings.Join(params, " ")
+}
+
+// Helper functions for common operations
+func getEndpoint(baseURL string, noLog bool) string {
+    if noLog {
+        return strings.Replace(baseURL, "/v1/", "/v1/nolog/", 1)
+    }
+    return baseURL
+}
+
+func getWebSocketEndpoint(noLog bool) string {
+    if noLog {
+        return "wss://acp-api.amivoice.com/v1/nolog/"
+    }
+    return "wss://acp-api.amivoice.com/v1/"
+}
+
+func openAudioFile(filename string) (*os.File, error) {
+    file, err := os.Open(filename)
+    if err != nil {
+        return nil, fmt.Errorf("音声ファイルを開けません: %v", err)
+    }
+    return file, nil
+}
+
+func createMultipartForm(config *Config, useFormFile bool) (io.Reader, string, error) {
+    body := &bytes.Buffer{}
+    writer := multipart.NewWriter(body)
+    
+    writer.WriteField("u", config.AppKey)
+    writer.WriteField("d", buildDParams(config))
+    
+    if config.AudioFormat != "" {
+        writer.WriteField("c", config.AudioFormat)
+    }
+    
+    file, err := openAudioFile(config.AudioFile)
+    if err != nil {
+        return nil, "", err
+    }
+    defer file.Close()
+    
+    var part io.Writer
+    if useFormFile {
+        part, err = writer.CreateFormFile("a", filepath.Base(config.AudioFile))
+    } else {
+        part, err = writer.CreateFormField("a")
+    }
+    if err != nil {
+        return nil, "", err
+    }
+    
+    if _, err = io.Copy(part, file); err != nil {
+        return nil, "", err
+    }
+    
+    if err = writer.Close(); err != nil {
+        return nil, "", err
+    }
+    
+    return body, writer.FormDataContentType(), nil
+}
+
+func doHTTPRequest(method, url string, body io.Reader, headers map[string]string, timeout time.Duration, verbose bool) ([]byte, error) {
+    req, err := http.NewRequest(method, url, body)
+    if err != nil {
+        return nil, err
+    }
+    
+    for key, value := range headers {
+        req.Header.Set(key, value)
+    }
+    
+    client := &http.Client{Timeout: timeout}
+    resp, err := client.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    
+    respBody, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return nil, err
+    }
+    
+    if verbose {
+        log.Printf("HTTPステータス: %d", resp.StatusCode)
+        log.Printf("レスポンス: %s", string(respBody))
+    }
+    
+    if resp.StatusCode != http.StatusOK {
+        return nil, fmt.Errorf("HTTPエラー: %d - %s", resp.StatusCode, string(respBody))
+    }
+    
+    return respBody, nil
+}
+
+func authenticateWebSocket(conn *websocket.Conn, appKey string) error {
+    authCmd := fmt.Sprintf("s %s", appKey)
+    if err := conn.WriteMessage(websocket.TextMessage, []byte(authCmd)); err != nil {
+        return err
+    }
+    
+    _, msg, err := conn.ReadMessage()
+    if err != nil {
+        return err
+    }
+    
+    if !strings.HasPrefix(string(msg), "s ") {
+        return fmt.Errorf("認証エラー: %s", string(msg))
+    }
+    
+    return nil
+}
+
+func startWebSocketRecognition(conn *websocket.Conn, config *Config) error {
+    dParams := buildDParams(config)
+    startCmd := fmt.Sprintf("s %s %s", config.AudioFormat, dParams)
+    return conn.WriteMessage(websocket.TextMessage, []byte(startCmd))
+}
+
+func sendAudioDataWebSocket(conn *websocket.Conn, audioFile string) error {
+    file, err := openAudioFile(audioFile)
+    if err != nil {
+        return err
+    }
+    defer file.Close()
+    
+    buffer := make([]byte, 4096)
+    for {
+        n, err := file.Read(buffer)
+        if err == io.EOF {
+            break
+        }
+        if err != nil {
+            return err
+        }
+        
+        if err := conn.WriteMessage(websocket.BinaryMessage, append([]byte("p "), buffer[:n]...)); err != nil {
+            return err
+        }
+    }
+    
+    return nil
+}
+
+func receiveWebSocketResults(conn *websocket.Conn, verbose bool) (string, error) {
+    var results []string
+    for {
+        _, msg, err := conn.ReadMessage()
+        if err != nil {
+            return "", err
+        }
+        
+        msgStr := string(msg)
+        if verbose {
+            log.Printf("受信: %s", msgStr)
+        }
+        
+        if strings.HasPrefix(msgStr, "A ") || strings.HasPrefix(msgStr, "U ") {
+            parts := strings.SplitN(msgStr, " ", 2)
+            if len(parts) > 1 {
+                var result map[string]interface{}
+                if err := json.Unmarshal([]byte(parts[1]), &result); err == nil {
+                    if text, ok := result["text"].(string); ok && text != "" {
+                        results = append(results, text)
+                    }
+                }
+            }
+        } else if strings.HasPrefix(msgStr, "e ") {
+            break
+        } else if strings.HasPrefix(msgStr, "E ") {
+            return "", fmt.Errorf("WebSocketエラー: %s", msgStr)
+        }
+    }
+    
+    return strings.Join(results, "\n"), nil
+}
+
+func loadEnvFile() {
+    // 現在のディレクトリの親ディレクトリの.envファイルを読み込む
+    envPath := "../.env"
+    
+    file, err := os.Open(envPath)
+    if err != nil {
+        // .envファイルが存在しない場合は無視
+        return
+    }
+    defer file.Close()
+    
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        line := strings.TrimSpace(scanner.Text())
+        
+        // 空行やコメント行をスキップ
+        if line == "" || strings.HasPrefix(line, "#") {
+            continue
+        }
+        
+        // KEY=VALUE形式をパース
+        parts := strings.SplitN(line, "=", 2)
+        if len(parts) == 2 {
+            key := strings.TrimSpace(parts[0])
+            value := strings.TrimSpace(parts[1])
+            
+            // 既に環境変数が設定されている場合は上書きしない
+            if os.Getenv(key) == "" {
+                os.Setenv(key, value)
+            }
+        }
+    }
 }
 
 func formatResponse(resp *SyncResponse, config *Config) string {

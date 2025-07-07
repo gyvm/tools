@@ -16,6 +16,10 @@ go get github.com/gorilla/websocket
 
 # ビルド
 go build -o amivoice-cli main.go
+
+# 環境変数の設定（tools/ ディレクトリ全体で共通）
+cp ../.env.example ../.env
+# ../.envファイルを編集してAPP KEYを設定
 ```
 
 ## 使い方
@@ -26,8 +30,12 @@ go build -o amivoice-cli main.go
 # 同期HTTPインタフェース（デフォルト）
 ./amivoice-cli -appkey YOUR_APP_KEY -file audio.wav
 
-# 環境変数でAPP KEYを設定
+# 環境変数でAPP KEYを設定（方法1: export）
 export AMIVOICE_APP_KEY=YOUR_APP_KEY
+./amivoice-cli -file audio.wav
+
+# 環境変数でAPP KEYを設定（方法2: .envファイル）
+# ../.envファイルにAMIVOICE_APP_KEY=YOUR_APP_KEYを設定
 ./amivoice-cli -file audio.wav
 ```
 
@@ -133,6 +141,7 @@ export AMIVOICE_APP_KEY=YOUR_APP_KEY
 ### 認証エラーが発生する場合
 - APP KEYが正しいか確認
 - 環境変数 `AMIVOICE_APP_KEY` が設定されているか確認
+- `../.env` ファイルが存在し、正しく設定されているか確認
 
 ### 音声認識結果が空の場合
 - 音声フォーマットが正しいか確認
@@ -142,6 +151,36 @@ export AMIVOICE_APP_KEY=YOUR_APP_KEY
 ### タイムアウトエラーが発生する場合
 - ネットワーク接続を確認
 - 非同期インタフェースの場合は `-polling` 間隔を長くする
+
+## ファイル構成
+
+```
+tools/
+├── .env.example     # 環境変数テンプレート（全ツール共通）
+├── .env             # 環境変数設定（全ツール共通、gitignoreに追加推奨）
+└── amivoice-cli/
+    ├── main.go      # メインプログラム
+    ├── go.mod       # Go モジュール設定
+    ├── README.md    # このファイル
+    └── .gitignore   # Git除外設定
+```
+
+## 環境変数設定
+
+`../.env` ファイル（tools/ ディレクトリの.env）で以下の環境変数を設定できます：
+
+```bash
+# 必須
+AMIVOICE_APP_KEY=your_app_key_here
+
+# オプション（コマンドライン引数で上書き可能）
+AMIVOICE_ENGINE=-a-general
+AMIVOICE_AUDIO_FORMAT=LSB16K
+AMIVOICE_INTERFACE=sync
+AMIVOICE_VERBOSE=false
+AMIVOICE_NOLOG=false
+AMIVOICE_POLLING_INTERVAL=5
+```
 
 ## ライセンス
 
